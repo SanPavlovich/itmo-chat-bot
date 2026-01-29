@@ -1,9 +1,11 @@
 """
 Модуль для рекомендаций по выбору дисциплин
 """
-from typing import List, Dict, Tuple
+from typing import List, Dict, Tuple, Optional
 from dataclasses import dataclass
 from src.database import Course, MasterProgram, ProgramDatabase
+from src.vector_db import QdrantVectorDB, get_vector_db
+from src.embeddings import EmbeddingModel, get_embedding_model
 
 
 @dataclass
@@ -20,11 +22,23 @@ class UserProfile:
 class CourseRecommender:
     """Система рекомендаций дисциплин"""
     
-    def __init__(self, db: ProgramDatabase):
+    def __init__(self, db: ProgramDatabase, vector_db: QdrantVectorDB = None,
+                 use_vector_search: bool = True):
+        """
+        Инициализация системы рекомендаций
+        
+        Args:
+            db: База данных программ
+            vector_db: Векторная база данных Qdrant (опционально)
+            use_vector_search: Использовать ли векторный поиск
+        """
         self.db = db
+        self.vector_db = vector_db or get_vector_db()
+        self.use_vector_search = use_vector_search
+        self.embedding_model = get_embedding_model()
     
-    def create_user_profile(self, user_id: int, background: List[str], 
-                           interests: List[str], skills: List[str], 
+    def create_user_profile(self, user_id: int, background: List[str],
+                           interests: List[str], skills: List[str],
                            goals: List[str]) -> UserProfile:
         """Создает профиль пользователя"""
         profile = UserProfile(
@@ -35,7 +49,7 @@ class CourseRecommender:
             goals=goals
         )
         
-        # Сохраняем в базу
+        # Сохраняем в MongoDB
         self.db.update_user_profile(user_id, {
             'background': background,
             'interests': interests,
@@ -44,12 +58,78 @@ class CourseRecommender:
             'preferred_program': ''
         })
         
+        # Сохраняем в векторную базу для рекомендаций
+        if self.use_vector_search:
+            self.vector_db.add_user_profile(
+                user_id=user_id,
+                background=background,
+                interests=interests,
+                skills=skills,
+                goals=goals
+            )
+        
         return profile
     
-    def recommend_courses(self, user_id: int, program_id: str, 
+    def recommend_courses(self, user_id: int, program_id: str,
                          limit: int = 5) -> List[Tuple[Course, float]]:
         """
         Рекомендует выборные дисциплины для пользователя
+        
+        Args:
+            user_id: ID пользователя
+            program_id: ID программы
+            limit: Максимальное количество рекомендаций
+            
+        Returns:
+            Список кортежей (дисциплина, оценка релевантности)
+        """
+        # Используем векторный поиск если включен
+        if self.use_vector_search:
+            return self._recommend_courses_vector(user_id, program_id, limit)
+        
+        # Иначе используем классический метод
+        return self._recommend_courses_classic(user_id, program_id, limit)
+    
+    def _recommend_courses_vector(self, user_id: int, program_id: str,
+                                 limit: int = 5) -> List[Tuple[Course, float]]:
+        """
+        Рекомендует дисциплины с использованием векторного поиска
+        
+        Args:
+            user_id: ID пользователя
+            program_id: ID программы
+            limit: Максимальное количество рекомендаций
+            
+        Returns:
+            Список кортежей (дисциплина, оценка релевантности)
+        """
+        # Получаем рекомендации из векторной базы
+        vector_results = self.vector_db.recommend_courses_for_user(
+            user_id=user_id,
+            program_id=program_id,
+            limit=limit
+        )
+        
+        # Преобразуем результаты в формат (Course, float)
+        recommendations = []
+        for result in vector_results:
+            course_id = result.get("id")
+            score = result.get("score", 0.0)
+            
+            # Получаем объект Course из базы данных
+            program = self.db.get_program(program_id)
+            if program:
+                for course in program.courses:
+                    if course.name == result.get("name"):
+                        recommendations.append((course, score))
+                        break
+        
+        return recommendations
+    
+    def _recommend_courses_classic(self, user_id: int, program_id: str,
+                                  limit: int = 5) -> List[Tuple[Course, float]]:
+        """
+        Рекомендует дисциплины классическим методом (без векторного поиска)
         
         Args:
             user_id: ID пользователя
@@ -127,6 +207,52 @@ class CourseRecommender:
     def recommend_program(self, user_id: int) -> List[Tuple[MasterProgram, float]]:
         """
         Рекомендует подходящую программу на основе профиля пользователя
+        
+        Args:
+            user_id: ID пользователя
+            
+        Returns:
+            Список кортежей (программа, оценка соответствия)
+        """
+        # Используем векторный поиск если включен
+        if self.use_vector_search:
+            return self._recommend_program_vector(user_id)
+        
+        # Иначе используем классический метод
+        return self._recommend_program_classic(user_id)
+    
+    def _recommend_program_vector(self, user_id: int) -> List[Tuple[MasterProgram, float]]:
+        """
+        Рекомендует программы с использованием векторного поиска
+        
+        Args:
+            user_id: ID пользователя
+            
+        Returns:
+            Список кортежей (программа, оценка соответствия)
+        """
+        # Получаем рекомендации из векторной базы
+        vector_results = self.vector_db.recommend_programs_for_user(
+            user_id=user_id,
+            limit=10
+        )
+        
+        # Преобразуем результаты в формат (MasterProgram, float)
+        recommendations = []
+        for result in vector_results:
+            program_id = result.get("id")
+            score = result.get("score", 0.0)
+            
+            # Получаем объект MasterProgram из базы данных
+            program = self.db.get_program(program_id)
+            if program:
+                recommendations.append((program, score))
+        
+        return recommendations
+    
+    def _recommend_program_classic(self, user_id: int) -> List[Tuple[MasterProgram, float]]:
+        """
+        Рекомендует программы классическим методом (без векторного поиска)
         
         Args:
             user_id: ID пользователя
@@ -252,6 +378,87 @@ class CourseRecommender:
             result += "\n"
         
         return result
+    
+    def index_courses(self, program_id: str = None) -> int:
+        """
+        Индексирует дисциплины в векторную базу
+        
+        Args:
+            program_id: ID программы для индексации (опционально)
+            
+        Returns:
+            Количество проиндексированных дисциплин
+        """
+        if not self.use_vector_search:
+            return 0
+        
+        count = 0
+        
+        if program_id:
+            # Индексируем дисциплины одной программы
+            program = self.db.get_program(program_id)
+            if program:
+                for course in program.courses:
+                    success = self.vector_db.add_course(
+                        course_id=f"{program_id}_{course.name}",
+                        program_id=program_id,
+                        name=course.name,
+                        description=course.description,
+                        metadata={
+                            "type": course.type,
+                            "semester": course.semester
+                        }
+                    )
+                    if success:
+                        count += 1
+        else:
+            # Индексируем все дисциплины
+            programs = self.db.get_all_programs()
+            for program in programs:
+                for course in program.courses:
+                    success = self.vector_db.add_course(
+                        course_id=f"{program.program_id}_{course.name}",
+                        program_id=program.program_id,
+                        name=course.name,
+                        description=course.description,
+                        metadata={
+                            "type": course.type,
+                            "semester": course.semester
+                        }
+                    )
+                    if success:
+                        count += 1
+        
+        return count
+    
+    def index_programs(self) -> int:
+        """
+        Индексирует программы в векторную базу
+        
+        Returns:
+            Количество проиндексированных программ
+        """
+        if not self.use_vector_search:
+            return 0
+        
+        count = 0
+        programs = self.db.get_all_programs()
+        
+        for program in programs:
+            success = self.vector_db.add_program(
+                program_id=program.program_id,
+                title=program.title,
+                description=program.description,
+                skills=program.skills,
+                career=program.career,
+                metadata={
+                    "requirements": program.requirements
+                }
+            )
+            if success:
+                count += 1
+        
+        return count
 
 
 if __name__ == "__main__":

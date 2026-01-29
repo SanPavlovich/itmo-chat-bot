@@ -5,7 +5,14 @@ import re
 from typing import List, Dict, Optional, Tuple
 from dataclasses import dataclass
 from openai import OpenAI
+from pydantic import BaseModel
 import os
+
+
+class RelevanceCheck(BaseModel):
+    """Модель для структурированного ответа от OpenAI"""
+    is_relevant: bool
+    reason: str
 
 
 @dataclass
@@ -98,17 +105,13 @@ class RelevanceFilter:
         return False, "Вопрос не содержит ключевых слов, связанных с обучением в магистратуре"
     
     def _check_with_openai(self, question: str, context: Optional[DialogContext] = None) -> Tuple[bool, str]:
-        """Использует OpenAI для проверки релевантности"""
+        """Использует OpenAI для проверки релевантности с structured_output"""
         try:
             system_prompt = """Ты - фильтр релевантности для чат-бота о магистратуре ITMO.
 Твоя задача - определить, относится ли вопрос к теме обучения в магистратуре ITMO.
-Отвечай ТОЛЬКО в формате: YES|NO|причина
 
-Примеры:
-YES|Вопрос о программе обучения
-NO|Вопрос о погоде
-YES|Вопрос о поступлении
-NO|Вопрос о политике"""
+Релевантные темы: магистерские программы, дисциплины, поступление, обучение, карьера, навыки.
+Нерелевантные темы: погода, спорт, политика, развлечения, личные отношения."""
 
             context_info = ""
             if context and context.current_program:
@@ -120,15 +123,14 @@ NO|Вопрос о политике"""
                     {"role": "system", "content": system_prompt},
                     {"role": "user", "content": f"Вопрос: {question}{context_info}"}
                 ],
-                max_tokens=50,
+                response_format={"type": "json_object"},
                 temperature=0
             )
             
-            result = response.choices[0].message.content.strip()
-            if result.startswith("YES"):
-                return True, result.split("|", 1)[1] if "|" in result else "Релевантный вопрос"
-            else:
-                return False, result.split("|", 1)[1] if "|" in result else "Нерелевантный вопрос"
+            result = response.choices[0].message.content
+            relevance_check = RelevanceCheck.model_validate_json(result)
+            
+            return relevance_check.is_relevant, relevance_check.reason
                 
         except Exception as e:
             # При ошибке возвращаем False для безопасности
