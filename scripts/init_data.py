@@ -126,13 +126,17 @@ def init_sample_data():
     db.add_program(ai_product_program)
     
     print("✅ Данные успешно инициализированы!")
-    print(f"Добавлено программ: {len(db.programs)}")
+    print(f"Добавлено программ: {db.get_programs_count()}")
     
     # Выводим информацию о программах
-    for program_id, program in db.programs.items():
+    programs = db.get_all_programs()
+    for program in programs:
         print(f"\n📚 {program.title}")
         print(f"   Дисциплин: {len(program.courses)}")
         print(f"   Навыков: {len(program.skills)}")
+    
+    # Закрываем соединение с базой данных
+    db.close()
 
 
 if __name__ == "__main__":
